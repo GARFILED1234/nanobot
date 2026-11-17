@@ -5,6 +5,10 @@ from dotenv import load_dotenv
 from nanobot.utils.document import extract_text
 from zai import ZhipuAiClient
 import hashlib
+import jieba
+from typing import Dict, Any
+from rank_bm25 import BM25Okapi
+from fractions import Fraction
 
 class Document:
     def __init__(self, page_content: str, metadata: dict):
@@ -65,10 +69,13 @@ def _retrieve_documents(query,n_results:int=2):
 
     documents = r["documents"][0]
     metadatas = r["metadatas"][0]
-
+    ids = r["ids"][0]
     return [
-        Document(content, metadata or {})
-        for content, metadata in zip(documents, metadatas)
+        Document(
+            page_content=content,
+            metadata={**(metadata or {}), "id": id},
+        )
+        for content, metadata, id in zip(documents, metadatas, ids)
     ]
 
 def split_documents(documents,chunk_size:int =100,chunk_overlap:int=20):
@@ -93,7 +100,9 @@ def split_documents(documents,chunk_size:int =100,chunk_overlap:int=20):
     return rlist
 
 def _build_rag_prompt(query,n_results:int=2):
-    docs=_retrieve_documents(query,n_results)
+    candidate_k = 10
+    docs = _hybrid_retrieve_documents(query, candidate_k)
+    docs=_rerank_documents(query,docs,n_results)
     context=""
     for d in docs:
         filename = d.metadata.get("filename", "未知文件")
@@ -168,4 +177,94 @@ def get_existing_files():
         file_dict[source]=con_hash
     return file_dict
 
+def _bm25_retrieve_documents(query, n_results: int = 2):
+    collection = get_collection()
+    result = collection.get(
+        include=["documents", "metadatas"]
+    )
+    if not result["documents"]:
+        return []
+    tokenized_query=list(jieba.cut(query))
+    docs=result["documents"]
+    tokenized_docs=[]
+    for d in docs:
+        tokenized_docs.append(list(jieba.cut(d)))
+    bm25 = BM25Okapi(tokenized_docs)
+    scores = bm25.get_scores(tokenized_query)
+    order_list=sorted(
+        range(len(scores)),
+        key=lambda i: scores[i],
+        reverse=True
+    )
+    rdocs=[]
+    for i in order_list[:n_results]:
+        content = result["documents"][i]
+        metadata = (result["metadatas"][i] or {}).copy()
+        chunk_id = result["ids"][i]
+        metadata["id"] = chunk_id
+        doc=Document(page_content=content,metadata=metadata)
+        rdocs.append(doc)
+    return rdocs
 
+def _rrf_fusion(vector_docs, bm25_docs, n_results=2):
+    score_dict={}
+    for i in range(len(vector_docs)):
+        vd=vector_docs[i]
+        met=vd.metadata
+        id=met.get("id")
+        score_list={}
+        score_list["score"] = score_dict.get(id, 0) + Fraction(1, i+61)
+        score_list["doc"]=vd
+        score_dict[id]=score_list
+    for j in range(len(bm25_docs)):
+        bd=bm25_docs[j]
+        met=bd.metadata
+        id=met.get("id")
+        ds=Fraction(1, j+61)
+        score_list={}
+        vs=0
+        if id in score_dict:
+            score_list=score_dict[id]
+            vs=score_list["score"]
+        else:
+            score_list["doc"]=bd
+        score_list["score"]=ds+vs
+        score_dict[id]=score_list
+    docs = [
+        v["doc"]
+        for k, v in sorted(score_dict.items(), key=lambda kv: kv[1]["score"], reverse=True)
+    ]
+    return docs[:n_results]
+    
+def _hybrid_retrieve_documents(query, n_results=2):
+    k=10
+    count=get_collection().count()
+    if count == 0:
+        return []
+    k=min(k,count)
+    vector_d=_retrieve_documents(query,k) 
+    bm25_d=_bm25_retrieve_documents(query,k)
+    docs=_rrf_fusion(vector_docs=vector_d,bm25_docs=bm25_d,n_results=n_results)
+    return docs
+
+def _rerank_documents(query, docs, n_results=2):
+    if docs is None or len(docs)==0:
+        return []
+    documents = [d.page_content for d in docs]
+    response=client.post(
+        "/rerank",
+        cast_type=Dict[str, Any],
+        body={
+            "model": "rerank",
+            "query": query,
+            "documents": documents,
+            "top_n": n_results
+        }
+    )
+    r_docs=[]
+    for r in response["results"]:
+        i=r["index"]
+        if 0 <= i < len(docs):
+            r_docs.append(docs[i])
+    return r_docs
+    
