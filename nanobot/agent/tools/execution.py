@@ -146,6 +146,12 @@ async def _execute_tool_call(
             if len(prepared_tuple) == 3:
                 tool, params, prep_error = cast(tuple[Any, Any, str | None], prepared_tuple)
     if prep_error:
+        print(
+            f"[Tool Debug] prepare_call: name={tool_call.name!r}, "
+            f"tool_found={tool is not None}, params={params!r}, "
+            f"prep_error={prep_error!r}",
+            flush=True,
+        )
         payload = _with_retry_hint(prep_error)
         event = {
             "name": tool_call.name,
@@ -162,8 +168,9 @@ async def _execute_tool_call(
         if handled is not None:
             return handled
         return payload, event
-
+    print(f"[Tool Debug] before hook: {tool_call.name}, params={params!r}", flush=True)
     await hook.before_execute_tool(context, tool_call, tool, params)
+    print(f"[Tool Debug] after hook: {tool_call.name}", flush=True)
     try:
         with (
             file_read_context(tool_call.id, read_results)

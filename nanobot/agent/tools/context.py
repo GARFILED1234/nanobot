@@ -93,6 +93,7 @@ class ToolContext:
     workspace: str
     bus: MessageBus | None = None
     subagent_manager: SubagentManager | None = None
+    max_concurrent_planner_tasks: int = 3
     cron_service: CronService | None = None
     exec_session_manager: ExecSessionManager | None = None
     sessions: SessionManager | None = None

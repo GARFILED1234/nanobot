@@ -270,6 +270,7 @@ class AgentLoop:
         model: str | None = None,
         max_iterations: int | None = None,
         max_concurrent_subagents: int | None = None,
+        max_concurrent_planner_tasks: int | None = None,
         context_window_tokens: int | None = None,
         max_tool_result_chars: int | None = None,
         provider_retry_mode: str = "standard",
@@ -320,6 +321,11 @@ class AgentLoop:
         initial_model = model or provider.get_default_model()
         self.max_iterations = (
             max_iterations if max_iterations is not None else defaults.max_tool_iterations
+        )
+        self.max_concurrent_planner_tasks = (
+            max_concurrent_planner_tasks
+            if max_concurrent_planner_tasks is not None
+            else defaults.max_concurrent_planner_tasks
         )
         initial_context_window = (
             context_window_tokens
@@ -491,6 +497,7 @@ class AgentLoop:
             model=model,
             max_iterations=defaults.max_tool_iterations,
             max_concurrent_subagents=defaults.max_concurrent_subagents,
+            max_concurrent_planner_tasks=defaults.max_concurrent_planner_tasks,
             context_window_tokens=context_window_tokens,
             max_tool_result_chars=defaults.max_tool_result_chars,
             provider_retry_mode=defaults.provider_retry_mode,
@@ -624,6 +631,7 @@ class AgentLoop:
             workspace=str(self.workspace),
             bus=self.bus,
             subagent_manager=self.subagents,
+            max_concurrent_planner_tasks=self.max_concurrent_planner_tasks,
             cron_service=self.cron_service,
             exec_session_manager=self._exec_session_manager,
             sessions=self.sessions,

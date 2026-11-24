@@ -1745,6 +1745,12 @@ class OpenAICompatProvider(LLMProvider):
             _seen_tc_ids.add(b["id"])
 
         content = "".join(content_parts) or None
+        for b in tc_bufs.values():
+            logger.warning(
+        "[GLM Raw Tool Arguments] name={}, arguments={}",
+        b["name"],
+        b["arguments"],
+    )
         tool_calls = [
             ToolCallRequest(
                 id=b["id"] or _short_tool_id(),
