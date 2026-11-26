@@ -1,213 +1,193 @@
 
 import json
 import unittest
-
+from unittest.mock import MagicMock
 from nanobot.planner.planner import Planner
 
+
 class TestAcceptanceCriteria(unittest.TestCase):
-
     def setUp(self):
-        # _parse_response 不依赖 runtime，因此这里不需要真实 LLM
-        self.planner = Planner(runtime=None)
-
-    def make_criterion(
-        self,
-        criterion_id="C1",
-        criterion_type="file_exists",
-        parameters=None,
-    ):
-        if parameters is None:
-            parameters = {"path": "app.py"}
-
-        return {
-            "criterion_id": criterion_id,
-            "type": criterion_type,
-            "description": "检查验收条件",
-            "parameters": parameters,
-        }
-
-    def make_task(self, criteria=None, task_id="T1"):
+        self.planner = Planner(MagicMock())
+    def _build_response(self, criteria=None, parameters=None, criterion_type="file_exists"):
         if criteria is None:
-            criteria = [self.make_criterion()]
-
-        return {
-            "task_id": task_id,
-            "description": "实现任务",
-            "dependencies": [],
-            "acceptance_criteria": criteria,
-        }
-
-    def make_response(self, tasks):
-        return json.dumps({"tasks": tasks}, ensure_ascii=False)
-
-    def parse(self, tasks):
-        return self.planner._parse_response(
-            self.make_response(tasks)
-        )
-
-    # 1. 五种支持的验收类型都应该通过
-    def test_all_supported_criterion_types(self):
-        criteria = [
-            self.make_criterion(
-                "C1", "file_exists", {"path": "app.py"}
-            ),
-            self.make_criterion(
-                "C2", "directory_exists", {"path": "src"}
-            ),
-            self.make_criterion(
-                "C3", "file_contains",
-                {"path": "app.py", "text": "def main"}
-            ),
-            self.make_criterion(
-                "C4", "python_syntax", {"path": "app.py"}
-            ),
-            self.make_criterion(
-                "C5", "json_valid", {"path": "config.json"}
-            ),
-        ]
-
-        tasks = self.parse([self.make_task(criteria)])
-
-        self.assertEqual(len(tasks), 1)
-        self.assertEqual(len(tasks[0]["acceptance_criteria"]), 5)
-
-    # 2. 允许空验收标准列表
-    def test_empty_acceptance_criteria(self):
-        tasks = self.parse([
-            self.make_task(criteria=[])
-        ])
-
-        self.assertEqual(
-            tasks[0]["acceptance_criteria"], []
-        )
-
-    # 3. 不支持的验收类型应该拒绝
-    def test_unsupported_criterion_type(self):
-        criterion = self.make_criterion(
-            criterion_type="unknown_type"
-        )
-
-        with self.assertRaises(ValueError):
-            self.parse([self.make_task([criterion])])
-
-    # 4. 缺少必需参数应该拒绝
-    def test_missing_required_parameter(self):
-        criterion = self.make_criterion(
-            criterion_type="file_contains",
-            parameters={"path": "app.py"},
-        )
-
-        with self.assertRaises(ValueError):
-            self.parse([self.make_task([criterion])])
-
-    # 5. 存在多余参数应该拒绝
-    def test_extra_parameter(self):
-        criterion = self.make_criterion(
-            criterion_type="file_exists",
+            criteria = [
+                {
+                    "criterion_id": "C1",
+                    "type": criterion_type,
+                    "description": "检查文件是否存在",
+                    "parameters": parameters if parameters is not None else {"path": "app.py"}
+                }
+            ]
+        return json.dumps({
+            "tasks": [
+                {
+                    "task_id": "T1",
+                    "description": "创建应用文件",
+                    "dependencies": [],
+                    "acceptance_criteria": criteria
+                }
+            ]
+        })
+    def test_empty_acceptance_criteria_rejected(self):
+        response = self._build_response(criteria=[])
+        with self.assertRaisesRegex(ValueError, "任务验收标准不能为空"):
+            self.planner._parse_response(response)
+    def test_parameter_name_with_surrounding_spaces_normalized(self):
+        response = self._build_response(parameters={" path ": "my project/app.py"})
+        tasks = self.planner._parse_response(response)
+        parameters = tasks[0]["acceptance_criteria"][0].parameters
+        self.assertEqual(parameters, {"path": "my project/app.py"})
+    def test_normalized_duplicate_parameter_names_rejected(self):
+        response = self._build_response(
             parameters={
                 "path": "app.py",
-                "extra": "unexpected",
-            },
+                " path ": "other.py"
+            }
         )
-
+        with self.assertRaisesRegex(ValueError, "验收标准参数名称重复"):
+            self.planner._parse_response(response)
+    def test_path_value_internal_spaces_preserved(self):
+        response = self._build_response(parameters={"path": "my project/app.py"})
+        tasks = self.planner._parse_response(response)
+        parameters = tasks[0]["acceptance_criteria"][0].parameters
+        self.assertEqual(parameters["path"], "my project/app.py")
+    def test_unsupported_criterion_type_rejected(self):
+        response = self._build_response(criterion_type="shell_command")
         with self.assertRaises(ValueError):
-            self.parse([self.make_task([criterion])])
-
-    # 6. 参数名为空应该拒绝
-    def test_empty_parameter_name(self):
-        criterion = self.make_criterion(
-            parameters={"   ": "app.py"}
+            self.planner._parse_response(response)
+    def test_missing_required_parameter_rejected(self):
+        response = self._build_response(parameters={})
+        with self.assertRaisesRegex(ValueError, "验收标准参数不符合要求"):
+            self.planner._parse_response(response)
+    def test_extra_parameter_rejected(self):
+        response = self._build_response(
+            parameters={"path": "app.py", "extra": "value"}
         )
-
-        with self.assertRaises(ValueError):
-            self.parse([self.make_task([criterion])])
-
-    # 7. 参数值不限制为字符串
-    def test_parameter_value_can_be_non_string(self):
-        criterion = self.make_criterion(
-            parameters={"path": 123}
-        )
-
-        tasks = self.parse([self.make_task([criterion])])
-
-        self.assertEqual(
-            tasks[0]["acceptance_criteria"][0].parameters["path"],
-            123,
-        )
-
-    # 8. 同一个任务中 criterion_id 重复应该拒绝
-    def test_duplicate_criterion_id_in_same_task(self):
+        with self.assertRaisesRegex(ValueError, "验收标准参数不符合要求"):
+            self.planner._parse_response(response)
+    def test_duplicate_criterion_id_after_strip_rejected(self):
         criteria = [
-            self.make_criterion("C1"),
-            self.make_criterion("C1", "python_syntax"),
+            {
+                "criterion_id": "C1",
+                "type": "file_exists",
+                "description": "检查文件一",
+                "parameters": {"path": "app.py"}
+            },
+            {
+                "criterion_id": " C1 ",
+                "type": "file_exists",
+                "description": "检查文件二",
+                "parameters": {"path": "other.py"}
+            }
         ]
-
+        response = self._build_response(criteria=criteria)
         with self.assertRaises(ValueError):
-            self.parse([self.make_task(criteria)])
-
-    # 9. 不同任务可以使用相同的 criterion_id
-    def test_same_criterion_id_in_different_tasks(self):
-        tasks = self.parse([
-            self.make_task(
-                [self.make_criterion("C1")],
-                task_id="T1",
-            ),
-            self.make_task(
-                [self.make_criterion("C1")],
-                task_id="T2",
-            ),
-        ])
-
-        self.assertEqual(len(tasks), 2)
-
-    # 10. criterion_id 为空应该拒绝
-    def test_empty_criterion_id(self):
-        criterion = self.make_criterion(
-            criterion_id="   "
-        )
-
-        with self.assertRaises(ValueError):
-            self.parse([self.make_task([criterion])])
-
-    # 11. criterion_id 前后空格应该被清理
-    def test_criterion_id_is_stripped(self):
-        criterion = self.make_criterion(
-            criterion_id=" C1 "
-        )
-
-        tasks = self.parse([self.make_task([criterion])])
-
-        self.assertEqual(
-            tasks[0]["acceptance_criteria"][0].criterion_id,
-            "C1",
-        )
-
-    # 12. 缺少 acceptance_criteria 应该拒绝
-    def test_missing_acceptance_criteria(self):
-        task = {
-            "task_id": "T1",
-            "description": "实现任务",
-            "dependencies": [],
+            self.planner._parse_response(response)
+    def test_duplicate_task_id_rejected(self):
+        data = {
+            "tasks": [
+                {
+                    "task_id": "T1",
+                    "description": "任务一",
+                    "dependencies": [],
+                    "acceptance_criteria": [
+                        {
+                            "criterion_id": "C1",
+                            "type": "file_exists",
+                            "description": "检查文件",
+                            "parameters": {"path": "a.py"}
+                        }
+                    ]
+                },
+                {
+                    "task_id": " T1 ",
+                    "description": "任务二",
+                    "dependencies": [],
+                    "acceptance_criteria": [
+                        {
+                            "criterion_id": "C1",
+                            "type": "file_exists",
+                            "description": "检查文件",
+                            "parameters": {"path": "b.py"}
+                        }
+                    ]
+                }
+            ]
         }
-
         with self.assertRaises(ValueError):
-            self.parse([task])
-
-    # 13. acceptance_criteria 不是列表应该拒绝
-    def test_acceptance_criteria_not_list(self):
-        task = self.make_task()
-        task["acceptance_criteria"] = "C1"
-
+            self.planner._parse_response(json.dumps(data))
+    def test_valid_acceptance_criteria_parsed(self):
+        response = self._build_response()
+        tasks = self.planner._parse_response(response)
+        self.assertEqual(len(tasks), 1)
+        criterion = tasks[0]["acceptance_criteria"][0]
+        self.assertEqual(criterion.criterion_id, "C1")
+        self.assertEqual(criterion.type, "file_exists")
+        self.assertEqual(criterion.parameters, {"path": "app.py"})
+    def test_all_supported_criterion_types(self):
+        cases = [
+            ("file_exists", {"path": "app.py"}),
+            ("directory_exists", {"path": "src"}),
+            ("file_contains", {"path": "app.py", "text": "def main"}),
+            ("python_syntax", {"path": "app.py"}),
+            ("json_valid", {"path": "config.json"})
+        ]
+        for criterion_type, parameters in cases:
+            with self.subTest(criterion_type=criterion_type):
+                response = self._build_response(
+                    parameters=parameters,
+                    criterion_type=criterion_type
+                )
+                tasks = self.planner._parse_response(response)
+                self.assertEqual(
+                    tasks[0]["acceptance_criteria"][0].type,
+                    criterion_type
+                )
+    def test_dependency_duplicate_rejected(self):
+        data = {
+            "tasks": [
+                {
+                    "task_id": "T1",
+                    "description": "任务一",
+                    "dependencies": ["T2", " T2 "],
+                    "acceptance_criteria": [
+                        {
+                            "criterion_id": "C1",
+                            "type": "file_exists",
+                            "description": "检查文件",
+                            "parameters": {"path": "a.py"}
+                        }
+                    ]
+                },
+                {
+                    "task_id": "T2",
+                    "description": "任务二",
+                    "dependencies": [],
+                    "acceptance_criteria": [
+                        {
+                            "criterion_id": "C1",
+                            "type": "file_exists",
+                            "description": "检查文件",
+                            "parameters": {"path": "b.py"}
+                        }
+                    ]
+                }
+            ]
+        }
         with self.assertRaises(ValueError):
-            self.parse([task])
-
-    # 14. 参数不是字典应该拒绝
-    def test_parameters_not_dict(self):
-        criterion = self.make_criterion()
-        criterion["parameters"] = ["app.py"]
-
+            self.planner._parse_response(json.dumps(data))
+    def test_invalid_parameter_name_type_rejected(self):
+        response = self._build_response(parameters={})
+        data = json.loads(response)
+        data["tasks"][0]["acceptance_criteria"][0]["parameters"] = {
+            123: "app.py"
+        }
         with self.assertRaises(ValueError):
-            self.parse([self.make_task([criterion])])
+            self.planner._parse_response(json.dumps(data))
+    def test_parameter_name_with_internal_space_rejected(self):
+        response = self._build_response(parameters={"pa th": "app.py"})
+        with self.assertRaises(ValueError):
+            self.planner._parse_response(response)
 
 
 if __name__ == "__main__":

@@ -38,6 +38,8 @@ class DAGExecutor:
     async def _execute_one(self,task):
         try:
             task.status = TaskStatus.RUNNING
+            task.validation_status = ValidationStatus.NOT_CHECKED
+            task.validation_result = None
             if task.started_at is None:
                 task.started_at = datetime.now()
             result=await self.execute_task(task)
@@ -65,6 +67,7 @@ class DAGExecutor:
         task.validation_result = validation_result
         if not validation_result.passed:
             task.validation_status = ValidationStatus.FAILED
+            task.error = "任务验收失败"
             task.status = TaskStatus.FAILED
             task.completed_at = datetime.now()
             raise RuntimeError("任务验收失败")

@@ -85,6 +85,8 @@ def _is_path_exist(relative_path: str, workspace_root: Path):
         r_dict["passed"] = False
         r_dict["feedback"] = "文件路径不存在"
         return r_dict
+    if relative_path != relative_path.strip():
+        raise ValueError("文件路径不能包含首尾空格")
     try:
         root = workspace_root.resolve()
     except (OSError, ValueError, RuntimeError) as err:

@@ -101,6 +101,8 @@ class Planner:
             acceptance_criteria=t.get("acceptance_criteria")
             if acceptance_criteria is None or not isinstance(acceptance_criteria,list):
                 raise ValueError("llm返回格式有误")
+            if not acceptance_criteria:
+                raise ValueError("任务验收标准不能为空")
             new_acceptance=[]
             a_checked=set() 
             for a in acceptance_criteria:
@@ -127,6 +129,8 @@ class Planner:
                     p=p.strip()
                     if not p:
                         raise ValueError("llm返回格式有误")
+                    if p in new_parameters:
+                        raise ValueError("验收标准参数名称重复")
                     new_parameters[p]=v
                 actual = set(new_parameters.keys())
                 if actual !=CRITERION_REQUIRED_PARAMETERS.get(criterion_type):
