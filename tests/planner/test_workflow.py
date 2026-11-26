@@ -117,6 +117,7 @@ class TestDAGWorkflow(unittest.IsolatedAsyncioTestCase):
         MockSubagentExecutor.assert_called_once_with(
             self.manager,
             graph,
+            None,
         )
 
         MockDAGExecutor.assert_called_once_with(
@@ -204,6 +205,7 @@ class TestDAGWorkflow(unittest.IsolatedAsyncioTestCase):
             MockSubagentExecutor.assert_called_once_with(
                 self.manager,
                 graph,
+                None,
             )
 
             MockDAGExecutor.assert_called_once_with(

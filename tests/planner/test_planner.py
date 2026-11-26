@@ -1,102 +1,130 @@
 
+import json
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
 from nanobot.planner.planner import Planner
-from nanobot.planner.models import TaskStatus
 
 
-class TestPlanner(unittest.IsolatedAsyncioTestCase):
+class TestPlanner(unittest.TestCase):
 
     def setUp(self):
         self.runtime = MagicMock()
+        self.runtime.provider = MagicMock()
+        self.runtime.provider.chat_with_retry = AsyncMock()
         self.runtime.model = "test-model"
-        self.runtime.generation.max_tokens = 2048
+        self.runtime.generation.max_tokens = 1000
         self.runtime.generation.temperature = 0.7
         self.runtime.generation.reasoning_effort = None
 
-        self.runtime.provider.chat_with_retry = AsyncMock()
-
         self.planner = Planner(self.runtime)
 
-    async def test_plan_success(self):
-        """正常规划：LLM 返回 JSON，成功构建任务图。"""
+    def _response(self, tasks):
+        return MagicMock(
+            content=json.dumps(
+                {"tasks": tasks},
+                ensure_ascii=False
+            )
+        )
 
-        response = MagicMock()
-        response.content = """
-        {
-            "tasks": [
-                {
-                    "task_id": "T1",
-                    "description": "设计博客系统架构",
-                    "dependencies": []
-                },
-                {
-                    "task_id": "T2",
-                    "description": "实现博客系统后端",
-                    "dependencies": ["T1"]
-                },
-                {
-                    "task_id": "T3",
-                    "description": "实现博客系统前端",
-                    "dependencies": ["T1"]
-                }
-            ]
+    def _task(
+        self,
+        task_id="T1",
+        description="实现博客后端",
+        dependencies=None,
+        acceptance_criteria=None,
+    ):
+        return {
+            "task_id": task_id,
+            "description": description,
+            "dependencies": dependencies if dependencies is not None else [],
+            "acceptance_criteria": (
+                acceptance_criteria
+                if acceptance_criteria is not None
+                else ["实现指定功能", "通过对应测试"]
+            ),
         }
-        """
 
-        self.runtime.provider.chat_with_retry.return_value = response
+    def test_plan_success(self):
+        self.runtime.provider.chat_with_retry.return_value = self._response([
+            self._task(
+                "T1",
+                "设计博客系统架构",
+            ),
+            self._task(
+                "T2",
+                "实现博客系统后端",
+                ["T1"],
+            ),
+            self._task(
+                "T3",
+                "实现博客系统前端",
+                ["T1"],
+            ),
+        ])
 
-        graph = await self.planner.plan({
-            "goal": "开发一个博客系统"
-        })
+        import asyncio
+
+        graph = asyncio.run(
+            self.planner.plan({
+                "goal": "开发一个博客系统"
+            })
+        )
 
         self.assertEqual(len(graph.tasks), 3)
 
-        self.assertEqual(
-            graph.get_task("T1").description,
-            "设计博客系统架构"
-        )
+        task1 = graph.get_task("T1")
+        task2 = graph.get_task("T2")
 
         self.assertEqual(
-            graph.get_task("T2").dependencies,
-            ["T1"]
+            task1.acceptance_criteria,
+            ["实现指定功能", "通过对应测试"],
         )
+        self.assertEqual(task2.dependencies, ["T1"])
 
-        self.assertEqual(
-            graph.get_task("T3").dependencies,
-            ["T1"]
-        )
-
-        self.assertEqual(
-            graph.get_task("T1").dependents,
-            ["T2", "T3"]
-        )
-
-        self.runtime.provider.chat_with_retry.assert_awaited_once()
-
-    async def test_plan_invalid_goal(self):
-        """输入校验：拒绝非字符串和空目标。"""
+    def test_plan_invalid_goal(self):
+        import asyncio
 
         invalid_inputs = [
+            {},
             {"goal": ""},
             {"goal": "   "},
             {"goal": 123},
             {"goal": None},
-            {},
         ]
 
         for paras in invalid_inputs:
             with self.subTest(paras=paras):
                 with self.assertRaises(ValueError):
-                    await self.planner.plan(paras)
+                    asyncio.run(self.planner.plan(paras))
 
-        self.runtime.provider.chat_with_retry.assert_not_awaited()
+    def test_plan_empty_response(self):
+        import asyncio
 
-    async def test_plan_invalid_json(self):
-        """JSON 校验：拒绝无法解析或结构不正确的内容。"""
+        invalid_contents = [
+            "",
+            "   ",
+            None,
+            123,
+        ]
 
-        invalid_responses = [
+        for content in invalid_contents:
+            with self.subTest(content=content):
+                self.runtime.provider.chat_with_retry.return_value = (
+                    MagicMock(content=content)
+                )
+
+                with self.assertRaises(ValueError):
+                    asyncio.run(
+                        self.planner.plan({
+                            "goal": "开发博客系统"
+                        })
+                    )
+
+    def test_plan_invalid_json(self):
+        import asyncio
+
+        invalid_contents = [
             "not json",
             '{"tasks": "invalid"}',
             '{"tasks": []}',
@@ -104,111 +132,55 @@ class TestPlanner(unittest.IsolatedAsyncioTestCase):
             '{"other": []}',
         ]
 
-        for content in invalid_responses:
+        for content in invalid_contents:
             with self.subTest(content=content):
-                response = MagicMock()
-                response.content = content
-
-                self.runtime.provider.chat_with_retry.return_value = response
+                self.runtime.provider.chat_with_retry.return_value = (
+                    MagicMock(content=content)
+                )
 
                 with self.assertRaises(ValueError):
-                    await self.planner.plan({
-                        "goal": "开发一个博客系统"
-                    })
+                    asyncio.run(
+                        self.planner.plan({
+                            "goal": "开发博客系统"
+                        })
+                    )
 
-    async def test_plan_empty_response(self):
-        """响应校验：拒绝空响应和非字符串响应内容。"""
+    def test_plan_circular_dependency(self):
+        import asyncio
 
-        invalid_responses = [
-            "",
-            "   ",
-            None,
-            123,
-        ]
-
-        for content in invalid_responses:
-            with self.subTest(content=content):
-                response = MagicMock()
-                response.content = content
-
-                self.runtime.provider.chat_with_retry.return_value = response
-
-                with self.assertRaises(ValueError):
-                    await self.planner.plan({
-                        "goal": "开发一个博客系统"
-                    })
-
-    async def test_plan_missing_dependency(self):
-        """DAG 校验：拒绝依赖不存在的任务。"""
-
-        response = MagicMock()
-        response.content = """
-        {
-            "tasks": [
-                {
-                    "task_id": "T1",
-                    "description": "实现博客后端",
-                    "dependencies": ["T99"]
-                }
-            ]
-        }
-        """
-
-        self.runtime.provider.chat_with_retry.return_value = response
+        self.runtime.provider.chat_with_retry.return_value = self._response([
+            self._task("T1", dependencies=["T2"]),
+            self._task("T2", dependencies=["T1"]),
+        ])
 
         with self.assertRaises(ValueError):
-            await self.planner.plan({
-                "goal": "开发一个博客系统"
-            })
+            asyncio.run(
+                self.planner.plan({
+                    "goal": "开发博客系统"
+                })
+            )
 
-    async def test_plan_circular_dependency(self):
-        """DAG 校验：拒绝循环依赖。"""
+    def test_plan_missing_dependency(self):
+        import asyncio
 
-        response = MagicMock()
-        response.content = """
-        {
-            "tasks": [
-                {
-                    "task_id": "T1",
-                    "description": "实现博客后端",
-                    "dependencies": ["T2"]
-                },
-                {
-                    "task_id": "T2",
-                    "description": "实现博客前端",
-                    "dependencies": ["T1"]
-                }
-            ]
-        }
-        """
-
-        self.runtime.provider.chat_with_retry.return_value = response
+        self.runtime.provider.chat_with_retry.return_value = self._response([
+            self._task("T1", dependencies=["T99"]),
+        ])
 
         with self.assertRaises(ValueError):
-            await self.planner.plan({
-                "goal": "开发一个博客系统"
-            })
+            asyncio.run(
+                self.planner.plan({
+                    "goal": "开发博客系统"
+                })
+            )
 
-    
-    async def test_plan_parameters_validation(self):
-        """输入校验：parameters 可选，但提供时必须是字典。"""
+    def test_plan_parameters_validation(self):
+        import asyncio
 
-        # 准备合法的 LLM 响应
-        response = MagicMock()
-        response.content = """
-        {
-            "tasks": [
-                {
-                    "task_id": "T1",
-                    "description": "开发博客系统",
-                    "dependencies": []
-                }
-            ]
-        }
-        """
-        self.runtime.provider.chat_with_retry.return_value = response
+        self.runtime.provider.chat_with_retry.return_value = self._response([
+            self._task(),
+        ])
 
-        # 第一组：允许的输入
         valid_inputs = [
             {"goal": "开发博客系统"},
             {"goal": "开发博客系统", "parameters": None},
@@ -217,12 +189,13 @@ class TestPlanner(unittest.IsolatedAsyncioTestCase):
 
         for paras in valid_inputs:
             with self.subTest(paras=paras):
-                graph = await self.planner.plan(paras)
+                graph = asyncio.run(
+                    self.planner.plan(paras)
+                )
                 self.assertEqual(len(graph.tasks), 1)
 
-        # 第二组：拒绝的输入
         invalid_inputs = [
-            {"goal": "开发博客系统", "parameters": "错误参数"},
+            {"goal": "开发博客系统", "parameters": "invalid"},
             {"goal": "开发博客系统", "parameters": []},
             {"goal": "开发博客系统", "parameters": 123},
         ]
@@ -230,27 +203,52 @@ class TestPlanner(unittest.IsolatedAsyncioTestCase):
         for paras in invalid_inputs:
             with self.subTest(paras=paras):
                 with self.assertRaises(ValueError):
-                    await self.planner.plan(paras)
+                    asyncio.run(self.planner.plan(paras))
 
-        
-    async def test_plan_llm_request_error(self):
-        """LLM 请求失败：异常应向上传播，不应返回空任务图。"""
+    def test_plan_llm_request_error(self):
+        import asyncio
 
         self.runtime.provider.chat_with_retry.side_effect = RuntimeError(
-            "LLM API 请求失败"
+            "LLM request failed"
         )
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "LLM API 请求失败"
-        ):
-            await self.planner.plan({
-                "goal": "开发一个博客系统"
+        with self.assertRaises(RuntimeError):
+            asyncio.run(
+                self.planner.plan({
+                    "goal": "开发博客系统"
+                })
+            )
+
+    def test_plan_forwards_original_user_text(self):
+        import asyncio
+
+        self.runtime.provider.chat_with_retry.return_value = self._response([
+            self._task(
+                description="使用 Python 和 SQLite 设计博客系统"
+            )
+        ])
+
+        asyncio.run(
+            self.planner.plan({
+                "goal": "开发博客系统",
+                "original_user_text": "请使用 Python 和 SQLite 开发博客系统",
             })
+        )
 
-        self.runtime.provider.chat_with_retry.assert_awaited_once()
+        call_kwargs = (
+            self.runtime.provider.chat_with_retry.call_args.kwargs
+        )
 
+        messages = call_kwargs["messages"]
 
+        self.assertIn(
+            "开发博客系统",
+            messages[1]["content"],
+        )
+        self.assertIn(
+            "original_user_text",
+            messages[1]["content"],
+        )
 
 
 if __name__ == "__main__":

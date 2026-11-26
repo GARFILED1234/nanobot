@@ -31,6 +31,7 @@ class TestSubagentTaskExecutor(unittest.IsolatedAsyncioTestCase):
             turn_id="turn-001",
             persist_session=True,
             log_content=True,
+            original_user_text="测试用户原始需求",
         )
 
         task = Task(
@@ -59,6 +60,7 @@ class TestSubagentTaskExecutor(unittest.IsolatedAsyncioTestCase):
 
         prompt = manager.run_inline.await_args.kwargs["task"]
 
+        self.assertIn("测试用户原始需求", prompt)
         self.assertNotIn(
             "前面列出的前置任务均已完成",
             prompt,
@@ -82,6 +84,7 @@ class TestSubagentTaskExecutor(unittest.IsolatedAsyncioTestCase):
                     persist=True,
                     log_content=True,
                 ),
+                "disabled_tools": frozenset(),
             },
         )
 
@@ -99,6 +102,7 @@ class TestSubagentTaskExecutor(unittest.IsolatedAsyncioTestCase):
             turn_id="turn-001",
             persist_session=True,
             log_content=True,
+            original_user_text="测试用户原始需求",
         )
 
         graph = TaskGraph()
@@ -161,6 +165,7 @@ class TestSubagentTaskExecutor(unittest.IsolatedAsyncioTestCase):
             turn_id="turn-001",
             persist_session=True,
             log_content=True,
+            original_user_text="测试用户原始需求",
         )
 
         graph = TaskGraph()
@@ -225,6 +230,7 @@ class TestSubagentTaskExecutor(unittest.IsolatedAsyncioTestCase):
             turn_id="turn-001",
             persist_session=True,
             log_content=True,
+            original_user_text="测试用户原始需求",
         )
 
         task = Task(
@@ -267,6 +273,7 @@ class TestSubagentTaskExecutor(unittest.IsolatedAsyncioTestCase):
             turn_id="turn-001",
             persist_session=True,
             log_content=True,
+            original_user_text="测试用户原始需求",
         )
 
         task = Task(
@@ -314,3 +321,7 @@ class TestSubagentTaskExecutor(unittest.IsolatedAsyncioTestCase):
                 await executor(task)
 
         manager.run_inline.assert_not_awaited()
+
+
+if __name__ == "__main__":
+    unittest.main()

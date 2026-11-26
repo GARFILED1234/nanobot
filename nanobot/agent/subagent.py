@@ -102,6 +102,7 @@ class _SubagentTask:
     inbox: list[tuple[str, str]] = field(default_factory=list)
     outcome: _SubagentOutcome | None = None
     exec_manager: ExecSessionManager = field(default_factory=ExecSessionManager)
+    disabled_tools: frozenset[str] = field(default_factory=frozenset)
     cleanup_task: asyncio.Task[int] | None = None
 
     def raise_if_stopping(self) -> None:
@@ -493,6 +494,7 @@ class SubagentManager:
         workspace: Path | None = None,
         tools_config: ToolsConfig | None = None,
         exec_manager: ExecSessionManager | None = None,
+        disabled_tools: set[str] | frozenset[str] | None = None,
     ) -> ToolRegistry:
         """Build an isolated subagent tool registry via ToolLoader."""
         root = self.workspace if workspace is None else workspace
@@ -509,6 +511,9 @@ class SubagentManager:
             ),
         )
         ToolLoader().load(ctx, registry, scope="subagent")
+        if disabled_tools:
+            for name in disabled_tools:
+                registry.unregister(name)
         return registry
 
     def _create_task(
@@ -516,7 +521,7 @@ class SubagentManager:
         session_key: str | None, origin_message_id: str | None,
         temperature: float | None, workspace_scope: WorkspaceScope | None,
         runtime: LLMRuntime | None, *, announce: bool, origin_turn_id: str | None,
-        session_policy: SessionPolicy | None,
+        session_policy: SessionPolicy | None,disabled_tools: frozenset[str] = frozenset(),
     ) -> _SubagentTask:
         if runtime is None:
             runtime = self._compat_spawn_runtime()
@@ -552,6 +557,7 @@ class SubagentManager:
             },
             origin_message_id=origin_message_id,
             workspace_scope=workspace_scope,
+            disabled_tools=disabled_tools,
             announce=announce,
         )
         self._tasks[task_id] = record
@@ -604,13 +610,14 @@ class SubagentManager:
         runtime: LLMRuntime | None = None,
         origin_turn_id: str | None = None,
         session_policy: SessionPolicy | None = None,
+        disabled_tools: frozenset[str] = frozenset(),
     ) -> str:
         """Wait for the same task lifecycle without a background notice."""
         try:
             record = self._create_task(
                 task, label, origin_channel, origin_chat_id, session_key,
                 origin_message_id, temperature, workspace_scope, runtime, announce=False, origin_turn_id=origin_turn_id,
-                session_policy=session_policy,
+                session_policy=session_policy,disabled_tools=disabled_tools,
             )
         except SubagentControlError as exc:
             return ToolResult.error(f"Error: {exc}")
@@ -711,7 +718,7 @@ class SubagentManager:
             cfg = self._subagent_tools_config()
             cfg.restrict_to_workspace = workspace_scope.restrict_to_workspace
         # Construct from the agent workspace; the bound scope below supplies the project cwd.
-        tools = self._build_tools(tools_config=cfg, exec_manager=record.exec_manager)
+        tools = self._build_tools(tools_config=cfg, exec_manager=record.exec_manager,disabled_tools=record.disabled_tools)
         system_prompt = self._build_subagent_prompt(workspace=root)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},

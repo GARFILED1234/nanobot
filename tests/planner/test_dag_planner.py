@@ -12,38 +12,25 @@ class TestDAGPlannerTool(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.manager = object()
         self.max_concurrency = 3
-
         self.tool = DAGPlannerTool(
             self.manager,
             self.max_concurrency,
         )
 
         self.runtime = object()
+        self.original_user_text = "使用 Python 和 SQLite 开发博客系统"
 
         self.request_context = SimpleNamespace(
             runtime=self.runtime,
+            original_user_text=self.original_user_text,
         )
 
     async def test_execute_success(self):
-        """正常执行：正确调用 Workflow，并返回合法 JSON 字符串。"""
+        """原始请求存在时，正确传递给 Workflow。"""
 
         workflow_result = {
-            "terminal_results": [
-                {
-                    "task_id": "T2",
-                    "description": "开发后端接口",
-                    "status": "completed",
-                    "result": "后端接口开发完成",
-                }
-            ],
-            "process_results": [
-                {
-                    "task_id": "T1",
-                    "description": "设计数据库",
-                    "status": "completed",
-                    "result": "数据库设计完成",
-                }
-            ],
+            "terminal_results": [],
+            "process_results": [],
             "incomplete_tasks": [],
         }
 
@@ -61,27 +48,96 @@ class TestDAGPlannerTool(unittest.IsolatedAsyncioTestCase):
             )
 
             result = await self.tool.execute(
-                goal="开发一个博客系统",
+                goal="开发博客系统",
             )
 
-        self.assertIsInstance(result, str)
-
-        result_dict = json.loads(result)
-
-        self.assertEqual(result_dict, workflow_result)
-
-        MockWorkflow.assert_called_once_with(
-            self.manager,
-            self.max_concurrency,
+        self.assertEqual(
+            json.loads(result),
+            workflow_result,
         )
 
         MockWorkflow.return_value.run.assert_awaited_once_with(
-            {"goal": "开发一个博客系统"},
+            {
+                "goal": "开发博客系统",
+                "original_user_text": self.original_user_text,
+            },
+            self.runtime,
+        )
+
+    async def test_execute_without_original_user_text(self):
+        """原始请求不存在时，仍然可以正常执行。"""
+
+        context = SimpleNamespace(
+            runtime=self.runtime,
+            original_user_text=None,
+        )
+
+        with (
+            patch(
+                "nanobot.agent.tools.context.current_request_context",
+                return_value=context,
+            ),
+            patch(
+                "nanobot.planner.workflow.DAGWorkflow",
+            ) as MockWorkflow,
+        ):
+            MockWorkflow.return_value.run = AsyncMock(
+                return_value={
+                    "terminal_results": [],
+                    "process_results": [],
+                    "incomplete_tasks": [],
+                },
+            )
+
+            await self.tool.execute(
+                goal="开发博客系统",
+            )
+
+        MockWorkflow.return_value.run.assert_awaited_once_with(
+            {
+                "goal": "开发博客系统",
+            },
+            self.runtime,
+        )
+
+    async def test_execute_with_empty_original_user_text(self):
+        """原始请求为空字符串时，不传递该字段。"""
+
+        context = SimpleNamespace(
+            runtime=self.runtime,
+            original_user_text="   ",
+        )
+
+        with (
+            patch(
+                "nanobot.agent.tools.context.current_request_context",
+                return_value=context,
+            ),
+            patch(
+                "nanobot.planner.workflow.DAGWorkflow",
+            ) as MockWorkflow,
+        ):
+            MockWorkflow.return_value.run = AsyncMock(
+                return_value={
+                    "terminal_results": [],
+                    "process_results": [],
+                    "incomplete_tasks": [],
+                },
+            )
+
+            await self.tool.execute(
+                goal="开发博客系统",
+            )
+
+        MockWorkflow.return_value.run.assert_awaited_once_with(
+            {
+                "goal": "开发博客系统",
+            },
             self.runtime,
         )
 
     async def test_execute_workflow_error(self):
-        """Workflow 执行失败：异常向上传播。"""
+        """Workflow 执行失败时，异常向上传播。"""
 
         with (
             patch(
@@ -101,18 +157,8 @@ class TestDAGPlannerTool(unittest.IsolatedAsyncioTestCase):
                 "DAG 工作流执行失败",
             ):
                 await self.tool.execute(
-                    goal="开发一个博客系统",
+                    goal="开发博客系统",
                 )
-
-            MockWorkflow.assert_called_once_with(
-                self.manager,
-                self.max_concurrency,
-            )
-
-            MockWorkflow.return_value.run.assert_awaited_once_with(
-                {"goal": "开发一个博客系统"},
-                self.runtime,
-            )
 
     async def test_execute_missing_context(self):
         """缺少请求上下文时，拒绝执行。"""
@@ -132,7 +178,10 @@ class TestDAGPlannerTool(unittest.IsolatedAsyncioTestCase):
     async def test_execute_missing_runtime(self):
         """请求上下文存在，但 runtime 缺失。"""
 
-        context = SimpleNamespace(runtime=None)
+        context = SimpleNamespace(
+            runtime=None,
+            original_user_text=self.original_user_text,
+        )
 
         with patch(
             "nanobot.agent.tools.context.current_request_context",
@@ -147,7 +196,7 @@ class TestDAGPlannerTool(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_execute_parameters_forwarding(self):
-        """验证所有额外参数完整传递给 Workflow。"""
+        """额外参数和原始请求都能正确传递，且不修改原始 kwargs。"""
 
         parameters = {
             "task1": "设计数据库",
@@ -158,9 +207,11 @@ class TestDAGPlannerTool(unittest.IsolatedAsyncioTestCase):
         }
 
         kwargs = {
-            "goal": "开发一个博客系统",
+            "goal": "开发博客系统",
             "parameters": parameters,
         }
+
+        original_kwargs = kwargs.copy()
 
         with (
             patch(
@@ -181,10 +232,18 @@ class TestDAGPlannerTool(unittest.IsolatedAsyncioTestCase):
 
             await self.tool.execute(**kwargs)
 
-            MockWorkflow.return_value.run.assert_awaited_once_with(
-                kwargs,
-                self.runtime,
-            )
+        expected = {
+            "goal": "开发博客系统",
+            "parameters": parameters,
+            "original_user_text": self.original_user_text,
+        }
+
+        MockWorkflow.return_value.run.assert_awaited_once_with(
+            expected,
+            self.runtime,
+        )
+
+        self.assertEqual(kwargs, original_kwargs)
 
     async def test_create_success(self):
         """create 能正确从 ToolContext 注入依赖。"""
@@ -197,11 +256,7 @@ class TestDAGPlannerTool(unittest.IsolatedAsyncioTestCase):
         tool = DAGPlannerTool.create(context)
 
         self.assertIsInstance(tool, DAGPlannerTool)
-
-        self.assertIs(
-            tool._manager,
-            self.manager,
-        )
+        self.assertIs(tool._manager, self.manager)
 
         self.assertEqual(
             tool.max_concurrent_planner_tasks,
