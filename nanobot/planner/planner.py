@@ -1,8 +1,24 @@
 import json
 from .graph import TaskGraph
-from .models import Task
+from .models import Task,AcceptanceCriterion
 from nanobot.utils.llm_runtime import LLMRuntime
 from nanobot.utils.prompt_templates import render_template
+
+SUPPORTED_CRITERION_TYPES = {
+    "file_exists",
+    "directory_exists",
+    "file_contains",
+    "python_syntax",
+    "json_valid",
+}
+
+CRITERION_REQUIRED_PARAMETERS = {
+    "file_exists": {"path"},
+    "directory_exists": {"path"},
+    "file_contains": {"path", "text"},
+    "python_syntax": {"path"},
+    "json_valid": {"path"},
+}
 
 class Planner:
     def __init__(self,runtime:LLMRuntime):
@@ -82,8 +98,44 @@ class Planner:
                 raise ValueError("llm返回数据有误")
             if not isinstance(deps,list):
                 raise ValueError("llm返回格式有误")
+            acceptance_criteria=t.get("acceptance_criteria")
+            if acceptance_criteria is None or not isinstance(acceptance_criteria,list):
+                raise ValueError("llm返回格式有误")
+            new_acceptance=[]
+            a_checked=set() 
+            for a in acceptance_criteria:
+                if not isinstance(a,dict):
+                    raise ValueError("llm返回格式有误")
+                criterion_id=a.get("criterion_id")
+                criterion_type=a.get("type")
+                description=a.get("description")
+                parameters=a.get("parameters")
+                if not isinstance(criterion_id,str) or not isinstance(criterion_type,str) or not isinstance(description,str) or not isinstance(parameters,dict):
+                    raise ValueError("llm返回格式有误")
+                criterion_id=criterion_id.strip()
+                if criterion_id in a_checked:
+                    raise ValueError("llm返回数据有误")
+                a_checked.add(criterion_id)
+                criterion_type=criterion_type.strip()
+                description=description.strip()
+                if not criterion_id or not criterion_type or criterion_type not in SUPPORTED_CRITERION_TYPES or not description:
+                    raise ValueError("llm返回格式有误")
+                new_parameters={}
+                for p,v in parameters.items():
+                    if not isinstance(p,str):
+                        raise ValueError("llm返回格式有误")
+                    p=p.strip()
+                    if not p:
+                        raise ValueError("llm返回格式有误")
+                    new_parameters[p]=v
+                actual = set(new_parameters.keys())
+                if actual !=CRITERION_REQUIRED_PARAMETERS.get(criterion_type):
+                    raise ValueError("验收标准参数不符合要求")
+                a1=AcceptanceCriterion(criterion_id=criterion_id,type=criterion_type,description=description,parameters=new_parameters)
+                new_acceptance.append(a1)
             t["task_id"]=task_id
             t["description"]=des
+            t["acceptance_criteria"]=new_acceptance
             checked.add(task_id)
             deps_checked=set()
             new_deps=[]
@@ -101,7 +153,7 @@ class Planner:
     def _build_task_graph(self,tasks):
         graph = TaskGraph()
         for t in tasks:
-            task=Task(t["task_id"].strip(),t["description"].strip())
+            task=Task(task_id=t["task_id"].strip(),description=t["description"].strip(),acceptance_criteria=t["acceptance_criteria"])
             graph.add_task(task)
         for t in tasks:
             t_id=t["task_id"].strip()

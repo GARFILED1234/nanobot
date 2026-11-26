@@ -1,13 +1,17 @@
 from datetime import datetime
 import asyncio
+from pathlib import Path
+from .validation import TaskResultValidator
 from .graph import TaskGraph
-from .models import Task,TaskStatus
+from .models import Task,TaskStatus,ValidationStatus
 
 class DAGExecutor:
     def __init__(
         self,
         graph: TaskGraph,
         execute_task,
+        validator: TaskResultValidator,
+        workspace_root: Path,
         max_concurrency: int = 3,
     ):
         if not callable(execute_task):
@@ -18,14 +22,20 @@ class DAGExecutor:
             or max_concurrency <= 0
         ):
             raise ValueError("最大并发数必须是正整数")
-
+        if not isinstance(validator, TaskResultValidator):
+            raise ValueError("验收器类型不正确")
+        if not isinstance(workspace_root, Path):
+            raise ValueError("工作空间根目录必须是 Path 类型")
+        if not workspace_root.exists() or not workspace_root.is_dir():
+            raise ValueError("工作空间根目录不存在或不是目录")
         self.graph = graph
         self.execute_task = execute_task
         self.max_concurrency = max_concurrency
         self.running_tasks = {}
+        self.workspace_root=workspace_root.resolve()
+        self.validator=validator
 
     async def _execute_one(self,task):
-        task.error = None
         try:
             task.status = TaskStatus.RUNNING
             if task.started_at is None:
@@ -33,16 +43,35 @@ class DAGExecutor:
             result=await self.execute_task(task)
         except asyncio.CancelledError:
             task.status=TaskStatus.CANCELLED
+            task.validation_status = ValidationStatus.NOT_CHECKED
+            task.validation_result = None
             task.completed_at=datetime.now()
             raise 
         except Exception as err:
             task.status=TaskStatus.FAILED
             task.completed_at=datetime.now()
             task.error=str(err)
+            task.validation_status = ValidationStatus.NOT_CHECKED
+            task.validation_result = None
             raise 
-        task.status=TaskStatus.COMPLETED
         task.result = result
+        task.error = None
+        task.validation_status = ValidationStatus.NOT_CHECKED
+        task.validation_result = None
+        validation_result = self.validator.validate(
+            task.acceptance_criteria,
+            self.workspace_root
+        )
+        task.validation_result = validation_result
+        if not validation_result.passed:
+            task.validation_status = ValidationStatus.FAILED
+            task.status = TaskStatus.FAILED
+            task.completed_at = datetime.now()
+            raise RuntimeError("任务验收失败")
+        task.validation_status = ValidationStatus.PASSED
+        task.status=TaskStatus.COMPLETED
         task.completed_at = datetime.now()
+        task.error = None
         return result
 
     async def execute(self):
@@ -59,19 +88,8 @@ class DAGExecutor:
             available = min(available, len(ready_tasks))
             while(i<available):
                 t=ready_tasks[i]
-                try:
-                    async_task = asyncio.create_task(self._execute_one(t))
-                    self.running_tasks[t.task_id] = async_task
-                except Exception as err:
-                    if t.retry_count<t.max_retries:
-                        t.retry_count+=1
-                        t.status = TaskStatus.PENDING
-                        t.error=str(err)
-                        t.completed_at = None
-                    else:
-                        t.status = TaskStatus.FAILED
-                        t.error = str(err)
-                        t.completed_at = datetime.now()
+                async_task = asyncio.create_task(self._execute_one(t))
+                self.running_tasks[t.task_id] = async_task
                 i+=1
             if not ready_tasks and not self.running_tasks and not over:
                 raise RuntimeError("DAG 调度停滞：存在未完成任务，但没有可执行或运行中的任务")
@@ -100,8 +118,7 @@ class DAGExecutor:
                             task.status = TaskStatus.PENDING
                             task.completed_at=None
                         else:
-                            task.status = TaskStatus.FAILED
-                            task.error = str(err)
+                            task.status = TaskStatus.FAILED                
                             task.completed_at = datetime.now()
         
                 
@@ -114,5 +131,7 @@ class DAGExecutor:
             try:
                 await async_task
             except asyncio.CancelledError:
+                pass
+            except Exception:
                 pass
         task.status=TaskStatus.BLOCKED
