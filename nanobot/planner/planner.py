@@ -1,3 +1,4 @@
+
 import json
 from .graph import TaskGraph
 from .models import Task,AcceptanceCriterion
@@ -26,17 +27,17 @@ class Planner:
     
     async def plan(self,paras):
         if not isinstance(paras,dict):
-            raise ValueError("输入格式不正确")
+            raise ValueError("Planner输入错误：参数必须是字典")
         if "goal" not in paras:
-            raise ValueError("goal不存在")
+            raise ValueError("Planner输入错误：缺少goal字段")
         goal=paras["goal"]
         if not isinstance(goal,str) or not (goal:=goal.strip()):
-            raise ValueError("输入有误")
+            raise ValueError("Planner输入错误：goal必须是非空字符串")
         paras["goal"]=goal
         p=paras.get("parameters")
         if p is not None:
             if not isinstance(p,dict):
-                raise ValueError("输入格式不正确")
+                raise ValueError("Planner输入错误：parameters必须是字典")
         system_prompt=self._build_system_prompt()
         para = json.dumps(paras, ensure_ascii=False, indent=2)
         messages = [
@@ -54,8 +55,43 @@ class Planner:
         print(f"[Planner Debug] response.content type: {type(content)}")
         print(f"[Planner Debug] response.content: {content!r}", flush=True)
         if not isinstance(content,str) or not (content := content.strip()):
-            raise ValueError("llm返回结果为空")
-        tasks=self._parse_response(content)
+            raise ValueError("Planner规划失败：LLM返回内容为空或不是字符串")
+        
+        try:
+            tasks = self._parse_response(content)
+        except ValueError as err:
+            repair_messages = messages + [
+                {"role": "assistant", "content": content},
+                {
+                    "role": "user",
+                    "content": (
+                        "你刚才生成的 Planner JSON 未通过格式校验。\n"
+                        f"具体错误：{err}\n"
+                        "请根据错误修复之前的 JSON。\n"
+                        "要求：\n"
+                        "1. 只修复不符合要求的内容，尽量保留原有任务、描述和依赖关系。\n"
+                        "2. 必须遵守系统提示词中的所有规划规则。\n"
+                        "3. 必须输出完整 JSON，不能只输出修改片段。\n"
+                        "4. 只输出 JSON，不要添加 Markdown 代码块或解释。"
+                    )
+                }
+            ]
+            repair_response = await self.runtime.provider.chat_with_retry(
+                messages=repair_messages,
+                model=self.runtime.model,
+                max_tokens=self.runtime.generation.max_tokens,
+                temperature=self.runtime.generation.temperature,
+                reasoning_effort=self.runtime.generation.reasoning_effort,
+            )
+            repaired_content = repair_response.content
+            if not isinstance(repaired_content, str) or not (repaired_content := repaired_content.strip()):
+                raise ValueError(f"Planner自动修复失败：LLM返回内容为空或不是字符串，首次错误：{err}")
+            try:
+                tasks = self._parse_response(repaired_content)
+            except ValueError as repair_err:
+                raise ValueError(
+                    f"Planner自动修复失败：修复后的内容仍未通过校验。首次错误：{err}；修复错误：{repair_err}"
+                ) from repair_err
         graph=self._build_task_graph(tasks)
         return graph
 
@@ -64,7 +100,7 @@ class Planner:
 
     def _parse_response(self,response):
         if not isinstance(response, str):
-            raise ValueError("llm返回格式有误")
+            raise ValueError("Planner解析失败：LLM返回内容必须是字符串")
         try:
             lines = response.splitlines()
             if (
@@ -74,67 +110,122 @@ class Planner:
             ):
                 response = "\n".join(lines[1:-1]).strip()
             r_dict=json.loads(response)
-        except json.JSONDecodeError:
-            raise ValueError("llm返回格式有误")
+        except json.JSONDecodeError as err:
+            raise ValueError(
+                f"Planner JSON解析失败：{err.msg}，第{err.lineno}行第{err.colno}列"
+            ) from err
         if not isinstance(r_dict, dict):
-            raise ValueError("llm返回格式有误")
+            raise ValueError("Planner JSON结构错误：最外层必须是对象")
         tasks=r_dict.get("tasks")
         if not isinstance(tasks, list):
-            raise ValueError("llm返回格式有误")
+            raise ValueError("Planner JSON结构错误：tasks必须是数组")
         if not tasks:
-            raise ValueError("无任务")
+            raise ValueError("Planner规划失败：tasks数组不能为空")
         checked=set()
-        for t in tasks:
+        for index,t in enumerate(tasks, start=1):
             if not isinstance(t,dict):
-                raise ValueError("llm返回格式有误")
+                raise ValueError(f"Planner任务错误：第{index}个任务必须是对象")
             task_id=t.get("task_id")
             deps=t.get("dependencies")
             des=t.get("description")
             if not isinstance(task_id,str):
-                raise ValueError("llm返回格式有误")
+                raise ValueError(f"Planner任务错误：第{index}个任务的task_id必须是字符串")
             if not isinstance(des,str):
-                raise ValueError("llm返回格式有误")
-            if not (task_id := task_id.strip()) or task_id in checked or not (des := des.strip()):
-                raise ValueError("llm返回数据有误")
+                raise ValueError(f"Planner任务错误：第{index}个任务的description必须是字符串")
+            if not (task_id := task_id.strip()):
+                raise ValueError(f"Planner任务错误：第{index}个任务的task_id不能为空")
+            if task_id in checked:
+                raise ValueError(f"Planner任务错误：任务ID重复，task_id={task_id}")
+            if not (des := des.strip()):
+                raise ValueError(f"Planner任务错误：{task_id}的description不能为空")
             if not isinstance(deps,list):
-                raise ValueError("llm返回格式有误")
+                raise ValueError(f"Planner任务错误：{task_id}的dependencies必须是数组")
             acceptance_criteria=t.get("acceptance_criteria")
             if acceptance_criteria is None or not isinstance(acceptance_criteria,list):
-                raise ValueError("llm返回格式有误")
+                raise ValueError(f"Planner任务错误：{task_id}的acceptance_criteria必须是数组")
             if not acceptance_criteria:
-                raise ValueError("任务验收标准不能为空")
+                raise ValueError(f"Planner任务错误：{task_id}的验收标准不能为空")
             new_acceptance=[]
             a_checked=set() 
-            for a in acceptance_criteria:
+            for criterion_index,a in enumerate(acceptance_criteria, start=1):
                 if not isinstance(a,dict):
-                    raise ValueError("llm返回格式有误")
+                    raise ValueError(
+                        f"Planner验收标准错误：{task_id}的第{criterion_index}条验收标准必须是对象"
+                    )
                 criterion_id=a.get("criterion_id")
                 criterion_type=a.get("type")
                 description=a.get("description")
                 parameters=a.get("parameters")
-                if not isinstance(criterion_id,str) or not isinstance(criterion_type,str) or not isinstance(description,str) or not isinstance(parameters,dict):
-                    raise ValueError("llm返回格式有误")
+                if not isinstance(criterion_id,str):
+                    raise ValueError(
+                        f"Planner验收标准错误：{task_id}的第{criterion_index}条criterion_id必须是字符串"
+                    )
+                if not isinstance(criterion_type,str):
+                    raise ValueError(
+                        f"Planner验收标准错误：{task_id}的第{criterion_index}条type必须是字符串"
+                    )
+                if not isinstance(description,str):
+                    raise ValueError(
+                        f"Planner验收标准错误：{task_id}的第{criterion_index}条description必须是字符串"
+                    )
+                if not isinstance(parameters,dict):
+                    raise ValueError(
+                        f"Planner验收标准错误：{task_id}的第{criterion_index}条parameters必须是对象"
+                    )
                 criterion_id=criterion_id.strip()
+                if not criterion_id:
+                    raise ValueError(
+                        f"Planner验收标准错误：{task_id}的第{criterion_index}条criterion_id不能为空"
+                    )
                 if criterion_id in a_checked:
-                    raise ValueError("llm返回数据有误")
+                    raise ValueError(
+                        f"Planner验收标准错误：{task_id}/{criterion_id}重复"
+                    )
                 a_checked.add(criterion_id)
                 criterion_type=criterion_type.strip()
                 description=description.strip()
-                if not criterion_id or not criterion_type or criterion_type not in SUPPORTED_CRITERION_TYPES or not description:
-                    raise ValueError("llm返回格式有误")
+                if not criterion_type:
+                    raise ValueError(
+                        f"Planner验收标准错误：{task_id}/{criterion_id}的type不能为空"
+                    )
+                if criterion_type not in SUPPORTED_CRITERION_TYPES:
+                    raise ValueError(
+                        f"Planner验收标准错误：{task_id}/{criterion_id}不支持验收类型{criterion_type}"
+                    )
+                if not description:
+                    raise ValueError(
+                        f"Planner验收标准错误：{task_id}/{criterion_id}的description不能为空"
+                    )
                 new_parameters={}
                 for p,v in parameters.items():
                     if not isinstance(p,str):
-                        raise ValueError("llm返回格式有误")
+                        raise ValueError(
+                            f"Planner验收标准错误：{task_id}/{criterion_id}的参数名称必须是字符串"
+                        )
                     p=p.strip()
                     if not p:
-                        raise ValueError("llm返回格式有误")
+                        raise ValueError(
+                            f"Planner验收标准错误：{task_id}/{criterion_id}存在空参数名称"
+                        )
                     if p in new_parameters:
-                        raise ValueError("验收标准参数名称重复")
+                        raise ValueError(
+                            f"Planner验收标准错误：{task_id}/{criterion_id}参数名称规范化后重复，参数名={p}"
+                        )
                     new_parameters[p]=v
                 actual = set(new_parameters.keys())
-                if actual !=CRITERION_REQUIRED_PARAMETERS.get(criterion_type):
-                    raise ValueError("验收标准参数不符合要求")
+                required = CRITERION_REQUIRED_PARAMETERS.get(criterion_type)
+                if actual != required:
+                    missing = required - actual
+                    extra = actual - required
+                    details = []
+                    if missing:
+                        details.append(f"缺少参数：{', '.join(sorted(missing))}")
+                    if extra:
+                        details.append(f"不允许的参数：{', '.join(sorted(extra))}")
+                    raise ValueError(
+                        f"Planner验收标准错误：{task_id}/{criterion_id}的parameters不符合{criterion_type}要求；"
+                        + "；".join(details)
+                    )
                 a1=AcceptanceCriterion(criterion_id=criterion_id,type=criterion_type,description=description,parameters=new_parameters)
                 new_acceptance.append(a1)
             t["task_id"]=task_id
@@ -145,9 +236,9 @@ class Planner:
             new_deps=[]
             for d in deps:
                 if not isinstance(d,str) or not (d:=d.strip()):
-                    raise ValueError("llm返回格式有误")
+                    raise ValueError(f"Planner任务错误：{task_id}的dependencies包含非字符串或空依赖ID")
                 if d in deps_checked:
-                    raise ValueError("llm返回数据有误")
+                    raise ValueError(f"Planner任务错误：{task_id}的dependencies包含重复依赖，依赖ID={d}")
                 new_deps.append(d)
                 deps_checked.add(d)
             t["dependencies"]=new_deps
@@ -165,4 +256,3 @@ class Planner:
                 graph.add_dependency(t_id,d.strip())
         graph.validate()
         return graph
-
